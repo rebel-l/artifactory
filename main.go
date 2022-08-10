@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cheggaaa/pb/v3"
+
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
@@ -24,7 +26,7 @@ func main() {
 
 	ctx := context.Background()
 
-	o := NewOptions()
+	o := newOptions()
 
 	flag.StringVar(&o.application, "a", "", "name of the application (mandatory)")
 	flag.StringVar(&credentialFile, "c", "", "path and name of file with google credentials (mandatory)")
@@ -100,18 +102,18 @@ func do(ctx context.Context, svc *drive.Service, o options) error {
 		return fmt.Errorf("failed to read zip archive: %w", err)
 	}
 
-	// TODO: progress bar
+	bar := pb.StartNew(len(archive.File))
+	defer bar.Finish()
 
 	for _, v := range archive.File {
-		file := filepath.Join(o.dst, v.Name)
-		fmt.Println("unzipping file ", file)
+		bar.Increment()
 
+		file := filepath.Join(o.dst, v.Name)
 		if !strings.HasPrefix(file, filepath.Clean(o.dst)+string(os.PathSeparator)) {
 			return fmt.Errorf("invalid file path")
 		}
 
 		if v.FileInfo().IsDir() {
-			fmt.Println("creating directory...")
 			if err := os.MkdirAll(file, os.ModePerm); err != nil {
 				return fmt.Errorf("failed to create directory '%s': %w", file, err)
 			}
@@ -164,6 +166,6 @@ func (o options) IsValid() bool {
 	return o.application != "" && o.version != "" && o.dst != ""
 }
 
-func NewOptions() options {
+func newOptions() options {
 	return options{dst: "output"}
 }

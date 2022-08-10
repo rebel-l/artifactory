@@ -18,18 +18,21 @@ import (
 	"google.golang.org/api/option"
 )
 
+// TODO: would be nice to upload executable with github actions on tagging
 func main() {
+	var credentialFile string
+
 	ctx := context.Background()
 
-	dst := "output"
+	o := NewOptions()
 
-	var credentialFile, application, version string
-	flag.StringVar(&application, "a", "", "name of the application (mandatory)")
+	flag.StringVar(&o.application, "a", "", "name of the application (mandatory)")
 	flag.StringVar(&credentialFile, "c", "", "path and name of file with google credentials (mandatory)")
-	flag.StringVar(&version, "v", "", "version of the application (mandatory)")
+	flag.StringVar(&o.dst, "d", o.dst, "path to the destination")
+	flag.StringVar(&o.version, "v", "", "version of the application (mandatory)")
 	flag.Parse()
 
-	if credentialFile == "" || application == "" || version == "" {
+	if credentialFile == "" || !o.IsValid() {
 		flag.Usage()
 		return
 	}
@@ -39,32 +42,40 @@ func main() {
 		log.Fatalf("failed to init google drive service: %v", err)
 	}
 
+	if err = do(ctx, svc, o); err != nil {
+		log.Fatalf("failed to get artifact: %v", err)
+	}
+
+	log.Println("artifact successfully downloaded!")
+}
+
+func do(ctx context.Context, svc *drive.Service, o options) error {
 	log.Println("find folder ...")
 
-	q := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", application)
+	q := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", o.application)
 	response, err := svc.Files.List().Context(ctx).Q(q).Do()
 	if err != nil {
-		log.Fatalf("failed to find folder: %v", err)
+		return fmt.Errorf("failed to find folder: %w", err)
 	}
 
 	if len(response.Files) == 0 {
-		log.Fatal("no files found")
+		return fmt.Errorf("no files found")
 	} else if len(response.Files) > 1 {
-		log.Fatal("too many files found")
+		return fmt.Errorf("too many files found")
 	}
 
 	log.Println("find files ...")
 
-	q = fmt.Sprintf("name='%s.zip' and '%s' in parents and mimeType!='application/vnd.google-apps.folder'", version, response.Files[0].Id)
+	q = fmt.Sprintf("name='%s.zip' and '%s' in parents and mimeType!='application/vnd.google-apps.folder'", o.version, response.Files[0].Id)
 	response, err = svc.Files.List().Context(ctx).Q(q).Fields("nextPageToken", "files(id, name, createdTime)").Do()
 	if err != nil {
-		log.Fatalf("failed to list files: %v", err)
+		return fmt.Errorf("failed to list files: %w", err)
 	}
 
 	if response.NextPageToken != "" {
-		log.Fatalf("too many files for version %s found", version)
+		return fmt.Errorf("too many files for version %s found", o.version)
 	} else if len(response.Files) <= 0 {
-		log.Fatalf("no files for version %s found", version)
+		return fmt.Errorf("no files for version %s found", o.version)
 	}
 
 	_ = sort.Reverse(ByCreatedTime(response.Files))
@@ -73,64 +84,63 @@ func main() {
 
 	artifact, err := svc.Files.Get(response.Files[0].Id).Context(ctx).Download()
 	if err != nil {
-		log.Fatalf("failed to download file: %v", err)
+		return fmt.Errorf("failed to download file: %w", err)
 	}
 
 	log.Println("start to unzip artifact ...")
 
 	body, err := io.ReadAll(artifact.Body)
 	if err != nil {
-		log.Fatalf("failed to get body: %v", err)
+		return fmt.Errorf("failed to get body: %w", err)
 	}
 	_ = artifact.Body.Close()
 
 	archive, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
-		log.Fatalf("failed to read zip archive: %v", err)
+		return fmt.Errorf("failed to read zip archive: %w", err)
 	}
 
 	// TODO: progress bar
 
 	for _, v := range archive.File {
-		file := filepath.Join(dst, v.Name)
+		file := filepath.Join(o.dst, v.Name)
 		fmt.Println("unzipping file ", file)
 
-		if !strings.HasPrefix(file, filepath.Clean(dst)+string(os.PathSeparator)) {
-			fmt.Println("invalid file path")
-			return
+		if !strings.HasPrefix(file, filepath.Clean(o.dst)+string(os.PathSeparator)) {
+			return fmt.Errorf("invalid file path")
 		}
 
 		if v.FileInfo().IsDir() {
 			fmt.Println("creating directory...")
 			if err := os.MkdirAll(file, os.ModePerm); err != nil {
-				log.Fatalf("failed to create directory '%s': %v", file, err) // TODO: move all code with log.Fatal into subroutine which returns proper error
+				return fmt.Errorf("failed to create directory '%s': %w", file, err)
 			}
 			continue
 		}
 
 		if err := os.MkdirAll(filepath.Dir(file), os.ModePerm); err != nil {
-			log.Fatalf("failed to create directory '%s': %v", file, err)
+			return fmt.Errorf("failed to create directory '%s': %w", file, err)
 		}
 
 		dstFile, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, v.Mode())
 		if err != nil {
-			log.Fatalf("failed to create file '%s': %v", file, err)
+			return fmt.Errorf("failed to create file '%s': %w", file, err)
 		}
 
 		fileInArchive, err := v.Open()
 		if err != nil {
-			log.Fatalf("failed to open file '%s' of archive: %v", v.Name, err)
+			return fmt.Errorf("failed to open file '%s' of archive: %w", v.Name, err)
 		}
 
 		if _, err := io.Copy(dstFile, fileInArchive); err != nil {
-			log.Fatalf("failed to copy content of file '%s': %v", v.Name, err)
+			return fmt.Errorf("failed to copy content of file '%s': %w", v.Name, err)
 		}
 
 		_ = dstFile.Close()
 		_ = fileInArchive.Close()
 	}
 
-	log.Println("artifact successfully downloaded!")
+	return nil
 }
 
 type ByCreatedTime []*drive.File
@@ -142,4 +152,18 @@ func (b ByCreatedTime) Less(i, j int) bool {
 	second, _ := time.Parse(time.RFC3339, b[j].CreatedTime)
 
 	return first.Before(second)
+}
+
+type options struct {
+	dst         string
+	application string
+	version     string
+}
+
+func (o options) IsValid() bool {
+	return o.application != "" && o.version != "" && o.dst != ""
+}
+
+func NewOptions() options {
+	return options{dst: "output"}
 }
